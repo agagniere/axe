@@ -68,12 +68,13 @@ pub const Config = struct {
     } = .none,
 };
 
-fn noopDrain(w: *std.IO.Writer, data: []const []const u8, splat: usize) !usize {
+fn discardDrain(w: *std.IO.Writer, data: []const []const u8, splat: usize) !usize {
     var total: usize = w.end;
     for (data) |chunk| {
         total += chunk.len;
     }
     _ = splat;
+    w.end = 0;
     return total;
 }
 
@@ -83,7 +84,7 @@ pub fn Axe(comptime config: Config) type {
         var bogus: zeit.Time = .{};
         var void_writer: std.IO.Writer = .{
             .vtable = &.{
-                .drain = noopDrain,
+                .drain = discardDrain,
                 .flush = std.IO.Writer.noopFlush,
             },
             .buffer = &.{},
