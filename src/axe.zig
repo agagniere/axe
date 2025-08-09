@@ -731,34 +731,32 @@ fn writeLocation(
 
 test "log without styles" {
     const expectEqualStrings = std.testing.expectEqualStrings;
-    var list = std.ArrayList(u8).init(std.testing.allocator);
-    defer list.deinit();
+    var buffer: [256]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
 
     const log = Axe(.{
         .styles = .none,
         .quiet = true,
-        .buffering = false,
     });
-    try log.init(std.testing.allocator, &.{list.writer().any()}, null); // testing with maybe wrong writer
+    try log.init(std.testing.allocator, &.{&writer}, null);
     defer log.deinit(std.testing.allocator);
 
     log.info("Hello, {s}!", .{"world"});
-    try expectEqualStrings("info: Hello, world!\n", list.items);
-    list.resize(0) catch unreachable;
+    try expectEqualStrings("info: Hello, world!\n", writer.buffered());
+    writer.end = 0;
 
     log.scoped(.my_scope).warn("", .{});
-    try expectEqualStrings("warning(my_scope): \n", list.items);
-    list.resize(0) catch unreachable;
+    try expectEqualStrings("warning(my_scope): \n", writer.buffered());
+    writer.end = 0;
 
-    log.scoped(.other_scope).err("`{s}` not found: {}", .{ "test.txt", error.FileNotFound });
-    try expectEqualStrings("error(other_scope): `test.txt` not found: error.FileNotFound\n", list.items);
-    list.resize(0) catch unreachable;
+    log.scoped(.other_scope).err("`{s}` not found: {t}", .{ "test.txt", error.FileNotFound });
+    try expectEqualStrings("error(other_scope): `test.txt` not found: FileNotFound\n", writer.buffered());
 }
 
 test "log with complex config" {
     const expectEqualStrings = std.testing.expectEqualStrings;
-    var list = std.ArrayList(u8).init(std.testing.allocator);
-    defer list.deinit();
+    var buffer: [256]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
 
     const log = Axe(.{
         .format = "[%l]%s: %m", // no newline
@@ -779,32 +777,30 @@ test "log with complex config" {
         },
         .color = .always,
         .quiet = true,
-        .buffering = false,
         .mutex = .default,
     });
-    try log.init(std.testing.allocator, &.{arrayListWriter(&list)}, null);
+    try log.init(std.testing.allocator, &.{&writer}, null);
     defer log.deinit(std.testing.allocator);
 
     log.info("Hello, {s}!", .{"world"});
-    try expectEqualStrings("[" ++ Style.fmt(&.{.blue}, "INFO") ++ "]: Hello, world!", list.items);
-    list.resize(0) catch unreachable;
+    try expectEqualStrings("[" ++ Style.fmt(&.{.blue}, "INFO") ++ "]: Hello, world!", writer.buffered());
+    writer.end = 0;
 
     log.scoped(.my_scope).warn("", .{});
-    try expectEqualStrings("[" ++ Style.fmt(&.{.yellow}, "WARNING") ++ "] % my_scope: ", list.items);
-    list.resize(0) catch unreachable;
+    try expectEqualStrings("[" ++ Style.fmt(&.{.yellow}, "WARNING") ++ "] % my_scope: ", writer.buffered());
+    writer.end = 0;
 
-    log.scoped(.other_scope).err("`{s}` not found: {}", .{ "test.txt", error.FileNotFound });
+    log.scoped(.other_scope).err("`{s}` not found: {t}", .{ "test.txt", error.FileNotFound });
     try expectEqualStrings(
-        "[" ++ Style.fmt(&.{ .bold, .red }, "ERROR") ++ "] % other_scope: `test.txt` not found: error.FileNotFound",
-        list.items,
+        "[" ++ Style.fmt(&.{ .bold, .red }, "ERROR") ++ "] % other_scope: `test.txt` not found: FileNotFound",
+        writer.buffered(),
     );
-    list.resize(0) catch unreachable;
 }
 
 test "json log" {
     const expectEqualStrings = std.testing.expectEqualStrings;
-    var list = std.ArrayList(u8).init(std.testing.allocator);
-    defer list.deinit();
+    var buffer: [256]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
 
     const log = Axe(.{
         .format =
@@ -816,43 +812,28 @@ test "json log" {
         ,
         .quiet = true,
         .color = .never,
-        .buffering = false,
     });
-    try log.init(std.testing.allocator, &.{arrayListWriter(&list)}, null);
+    try log.init(std.testing.allocator, &.{&writer}, null);
     defer log.deinit(std.testing.allocator);
 
     log.debug("\"json log\"", .{});
     try expectEqualStrings(
         \\{"level":"debug","data":"json log"}
         \\
-    , list.items);
-    list.resize(0) catch unreachable;
+    , writer.buffered());
+    writer.end = 0;
 
     log.scoped(.main).info("\"json scoped\"", .{});
     try expectEqualStrings(
         \\{"level":"info","scope":"main","data":"json scoped"}
         \\
-    , list.items);
-    list.resize(0) catch unreachable;
+    , writer.buffered());
+    writer.end = 0;
 
     const data = .{ .a = 42, .b = 3.14 };
     log.info("{f}", .{std.json.fmt(data, .{})});
     try expectEqualStrings(
         \\{"level":"info","data":{"a":42,"b":3.14}}
         \\
-    , list.items);
-    list.resize(0) catch unreachable;
-}
-
-fn arrayListWriter(list: *std.ArrayList(u8)) std.io.AnyWriter {
-    return .{
-        .context = @ptrCast(list),
-        .writeFn = struct {
-            fn typeErasedWrite(context: *const anyopaque, bytes: []const u8) !usize {
-                const self: *std.ArrayList(u8) = @ptrCast(@alignCast(@constCast(context)));
-                try self.appendSlice(bytes);
-                return bytes.len;
-            }
-        }.typeErasedWrite,
-    };
+    , writer.buffered());
 }
