@@ -57,8 +57,8 @@ pub const Config = struct {
     level_text: LevelText = .{},
     /// Whether to write log messages to stderr.
     quiet: bool = false,
-    /// Whether to buffer the log messages before writing them.
-    buffering: bool = true,
+    /// Whether to flush writers after every log.
+    flush_each_log: bool = true,
     /// The mutex interface to use for the log messages.
     mutex: union(enum) {
         none,
@@ -68,16 +68,27 @@ pub const Config = struct {
     } = .none,
 };
 
+fn noopDrain(w: *std.IO.Writer, data: []const []const u8, splat: usize) !usize {
+    var total: usize = w.end;
+    for (data) |chunk| {
+        total += chunk.len;
+    }
+    _ = splat;
+    return total;
+}
+
 /// Create a new logger based on the given configuration.
 pub fn Axe(comptime config: Config) type {
     if (config.time_format == .strftime) comptime {
         var bogus: zeit.Time = .{};
-        const void_writer: std.io.GenericWriter(void, error{}, struct {
-            fn write(_: void, bytes: []const u8) error{}!usize {
-                return bytes.len;
-            }
-        }.write) = .{ .context = {} };
-        bogus.strftime(void_writer, config.time_format.strftime) catch |e|
+        var void_writer: std.IO.Writer = .{
+            .vtable = &.{
+                .drain = noopDrain,
+                .flush = std.IO.Writer.noopFlush,
+            },
+            .buffer = &.{},
+        };
+        bogus.strftime(&void_writer, config.time_format.strftime) catch |e|
             @compileError("Invalid strftime format: " ++ @errorName(e));
     };
 
@@ -87,7 +98,7 @@ pub fn Axe(comptime config: Config) type {
     };
 
     return struct {
-        var writers: []const std.io.AnyWriter = &.{};
+        var writers: []*std.Io.Writer = &.{};
         // zig/llvm can't handle this without explicit type
         var stderr: if (config.quiet) void else tty.Config = if (config.quiet) {} else .no_color;
         var timezone = if (config.time_format != .disabled) zeit.utc else {};
@@ -106,19 +117,19 @@ pub fn Axe(comptime config: Config) type {
         /// `env` is only used during initialization and is not stored.
         pub fn init(
             allocator: std.mem.Allocator,
-            additional_writers: ?[]const std.io.AnyWriter,
+            additional_writers: ?[]const *std.Io.Writer,
             env: ?*const std.process.EnvMap,
         ) !void {
             if (config.time_format != .disabled) {
                 timezone = try zeit.local(allocator, env);
             }
             if (additional_writers) |_writers| {
-                writers = try allocator.dupe(std.io.AnyWriter, _writers);
+                writers = try allocator.dupe(*std.Io.Writer, _writers);
             }
             if (!config.quiet) {
                 stderr = switch (config.color) {
-                    .auto => tty.detectConfig(std.io.getStdErr()),
-                    .always => if (builtin.os.tag == .windows) switch (tty.detectConfig(std.io.getStdErr())) {
+                    .auto => .detect(std.fs.File.stderr()),
+                    .always => if (builtin.os.tag == .windows) switch (.detect(std.fs.File.stderr())) {
                         .no_color, .escape_codes => .escape_codes,
                         .windows_api => |ctx| .{ .windows_api = ctx },
                     } else .escape_codes,
@@ -281,31 +292,23 @@ pub fn Axe(comptime config: Config) type {
             } else {};
 
             nosuspend {
-                if (config.buffering) {
-                    for (writers) |writer| {
-                        var bw = std.io.bufferedWriter(writer);
-                        print(src, bw.writer(), writers_tty_config, time, level, scope, format, args);
-                        bw.flush() catch {};
-                    }
-                    if (!config.quiet) {
-                        var bw = std.io.bufferedWriter(std.io.getStdErr().writer());
-                        print(src, bw.writer(), stderr, time, level, scope, format, args);
-                        bw.flush() catch {};
-                    }
-                } else {
-                    for (writers) |writer| {
-                        print(src, writer, writers_tty_config, time, level, scope, format, args);
-                    }
-                    if (!config.quiet) {
-                        print(src, std.io.getStdErr().writer(), stderr, time, level, scope, format, args);
-                    }
+                for (writers) |writer| {
+                    print(src, writer, writers_tty_config, time, level, scope, format, args);
+                    if (config.flush_each_log)
+                        writer.flush() catch {};
+                }
+                if (!config.quiet) {
+                    var buffer: [256]u8 = undefined;
+                    var standard_error = std.fs.File.stderr().writer(&buffer);
+                    defer standard_error.interface.flush() catch {};
+                    print(src, &standard_error.interface, stderr, time, level, scope, format, args);
                 }
             }
         }
 
         fn print(
             comptime src: ?std.builtin.SourceLocation,
-            writer: anytype,
+            writer: *std.Io.Writer,
             tty_config: tty.Config,
             time: if (config.time_format != .disabled) zeit.Time else void,
             comptime level: Level,
@@ -368,7 +371,7 @@ pub fn Axe(comptime config: Config) type {
             }
         }
 
-        inline fn writeTimeCallback(writer: anytype, time: zeit.Time) void {
+        inline fn writeTimeCallback(writer: *std.Io.Writer, time: zeit.Time) void {
             switch (config.time_format) {
                 .disabled => unreachable,
                 .gofmt => |gofmt| time.gofmt(writer, gofmt.fmt) catch {},
@@ -647,7 +650,7 @@ pub const FunctionMutex = struct {
 };
 
 inline fn callWithStyles(
-    writer: anytype,
+    writer: *std.Io.Writer,
     tty_config: tty.Config,
     comptime styles: []const Style,
     comptime callback: anytype,
@@ -690,16 +693,16 @@ fn parseScopeFormat(comptime format: []const u8, comptime scope: @Type(.enum_lit
     }
 }
 
-inline fn writeAllCallback(writer: anytype, bytes: []const u8) void {
+inline fn writeAllCallback(writer: *std.Io.Writer, bytes: []const u8) void {
     writer.writeAll(bytes) catch {};
 }
 
-inline fn printCallback(writer: anytype, comptime format: []const u8, args: anytype) void {
+inline fn printCallback(writer: *std.Io.Writer, comptime format: []const u8, args: anytype) void {
     writer.print(format, args) catch {};
 }
 
 fn writeLocation(
-    writer: anytype,
+    writer: *std.Io.Writer,
     comptime format: []const u8,
     loc: std.builtin.SourceLocation,
 ) void {
@@ -833,9 +836,9 @@ test "json log" {
     list.resize(0) catch unreachable;
 
     const data = .{ .a = 42, .b = 3.14 };
-    log.info("{}", .{std.json.fmt(data, .{})});
+    log.info("{f}", .{std.json.fmt(data, .{})});
     try expectEqualStrings(
-        \\{"level":"info","data":{"a":42,"b":3.14e0}}
+        \\{"level":"info","data":{"a":42,"b":3.14}}
         \\
     , list.items);
     list.resize(0) catch unreachable;
@@ -846,7 +849,7 @@ fn arrayListWriter(list: *std.ArrayList(u8)) std.io.AnyWriter {
         .context = @ptrCast(list),
         .writeFn = struct {
             fn typeErasedWrite(context: *const anyopaque, bytes: []const u8) !usize {
-                const self: *std.ArrayList(u8) = @constCast(@ptrCast(@alignCast(context)));
+                const self: *std.ArrayList(u8) = @ptrCast(@alignCast(@constCast(context)));
                 try self.appendSlice(bytes);
                 return bytes.len;
             }

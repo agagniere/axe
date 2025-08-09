@@ -1,8 +1,8 @@
 .{
     .name = .axe,
-    .version = "0.6.1",
+    .version = "0.7.0",
     .fingerprint = 0x6c6a1e2ce5546233,
-    .minimum_zig_version = "0.14.0",
+    .minimum_zig_version = "0.15.0-dev.1438+242102f9d",
     .dependencies = .{
         .zeit = .{
             .url = "git+https://github.com/rockorager/zeit?ref=zig-0.15#06ec40445cc477fea5a8369f1ba3881e2a3c00eb",
